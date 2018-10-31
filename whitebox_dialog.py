@@ -15,6 +15,7 @@ from metric import MetricsContainer
 import data
 import utils
 import domain
+from torch.autograd import Variable
 
 logging.basicConfig(format='%(asctime)s : %(levelname)s : %(filename)s : %(message)s', level=logging.INFO)
 
@@ -166,7 +167,7 @@ class Dialog(object):
         else:
             reader, writer = self.agents
 
-        #writer, reader = self.agents
+        writer, reader = self.agents
 
         conv = []
         # reset metrics
@@ -177,8 +178,14 @@ class Dialog(object):
 
         while True:
             # produce an utterance
-            if count_turns > self.args.max_turns:
-                    out = writer.write_selection(reader)
+            if count_turns > self.args.max_turns-1:
+                if writer == self.agents[0]:
+                    inpt_emb, inpt, lang_hs, lang_h, words = writer.write_white(reader)
+                    #print(writer.words[-1][0].grad)
+                    ### need padding in the input_emb
+                    break
+                #else:
+
             else:
                 out = writer.write()
 
@@ -204,14 +211,61 @@ class Dialog(object):
         ### Minhao: need to design loss focusing on the choices
         ### No evalution in the conversation????
 
-
+        bob = self.agents[1]
 
         choices = []
         #class_losses = []
         # generate choices for each of the agents
         #flag_loss=False
         
-        bob_choice, classify_loss = self.agents[1].choose(flag=True)
+        ####
+        # get the final loss and do the back-propagation
+        c=1
+        step_size = 1e-2   
+        #lang_hs[0].retain_grad()
+        #print(words)
+
+        print(inpt_emb.size(),inpt)
+
+        iterations = 100
+        for _ in range(iterations):
+            #print(inpt,len(bob.lang_hs),bob.lang_h.size())
+            #print(len(bob.lang_hs))
+            inpt_emb.retain_grad()
+            #bob.lang_hs[-1].retain_grad()
+            bob.read_emb(inpt_emb, inpt)
+            #print(len(bob.lang_hs))
+            loss1, bob_out, _ = bob.write_selection(wb_attack=True)
+            #print(len(bob.lang_hs))
+            #print(len(lang_hs))
+            bob.words = words.copy()
+            #print(len(lang_hs))
+            bob_choice, classify_loss, _ = bob.choose(inpt_emb=inpt_emb,wb_attack=True)
+            #print(len(bob.lang_hs))
+            t_loss = c*loss1 + classify_loss
+            #t_loss = loss1
+            #bob.lang_hs[2].retain_grad()
+            #logits.retain_grad()
+            #t_loss = classify_loss
+            t_loss.backward(retain_graph=True)
+            #print(len(bob.lang_hs))
+            
+            #print(logits.grad)
+            print(t_loss.item(),loss1.item(),classify_loss.item())
+        #print(inpt_emb.size())
+            #print(inpt_emb.grad.size())
+            inpt_emb.grad[:,:,256:] = 0
+            inpt_emb.grad[0,:,:] = 0
+            #print(inpt_emb.grad[2])
+            #inpt_emb.grad[0][:][:]=0
+            inpt_emb = inpt_emb - step_size * inpt_emb.grad
+
+            bob.lang_hs = lang_hs.copy()
+            bob.lang_h = lang_h.clone()
+            
+        #print(t_loss,lang_hs[0].grad)
+        print("attack finished")
+        #####
         choices.append(bob_choice)
         alice_choice = bob_choice[:]
         for indx in range(3):

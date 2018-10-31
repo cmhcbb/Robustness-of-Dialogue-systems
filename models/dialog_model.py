@@ -128,7 +128,7 @@ class DialogModel(modules.CudaModule):
         modules.init_cont(self.sel_encoder, self.args.init_range)
         modules.init_cont(self.sel_decoders, self.args.init_range)
 
-    def read(self, inpt, lang_h, ctx_h, prefix_token="THEM:"):
+    def read(self, inpt, lang_h, ctx_h, prefix_token="THEM:",wb_attack=False):
         """Reads a given utterance."""
         # inpt contains the pronounced utterance
         # add a "THEM:" token to the start of the message
@@ -137,17 +137,25 @@ class DialogModel(modules.CudaModule):
         inpt = torch.cat([self.to_device(prefix), inpt])
 
         # embed words
-        inpt_emb = self.word_encoder(inpt)
-
+        inpt_emb_o = self.word_encoder(inpt)
+        #inpt_emb_o = Variable(inpt_emb_o)
+        ### Minhao 
+        #should get here instead of exact words
+        #inpt_emb_o = Variable(inpt_emb_o) # to get the gradient from non-leaf variable restricted by pytorch
         # append the context embedding to every input word embedding
-        ctx_h_rep = ctx_h.expand(inpt_emb.size(0), ctx_h.size(1), ctx_h.size(2))
-        inpt_emb = torch.cat([inpt_emb, ctx_h_rep], 2)
-
+        ctx_h_rep = ctx_h.expand(inpt_emb_o.size(0), ctx_h.size(1), ctx_h.size(2))
+        inpt_emb = torch.cat([inpt_emb_o, ctx_h_rep], 2)
+        if wb_attack:
+            inpt_emb = Variable(inpt_emb)
+            #print(inpt_emb.size())
+            inpt_emb.requires_grad=True
         # finally read in the words
         self.reader.flatten_parameters()
         out, lang_h = self.reader(inpt_emb, lang_h)
-
-        return out, lang_h
+        if wb_attack:
+            return out,lang_h, inpt_emb, inpt_emb_o
+        else:
+            return out, lang_h
 
     def word2var(self, word):
         """Creates a variable from a given word."""
@@ -187,15 +195,31 @@ class DialogModel(modules.CudaModule):
         outs = [decoder.forward(h) for decoder in self.sel_decoders]
         return torch.cat(outs)
 
-    def generate_choice_logits(self, inpt, lang_h, ctx_h):
+    def generate_choice_logits(self, inpt, lang_h, ctx_h, o_inpt_emb=None, wb_attack=True):
         """Similar to forward_selection, but is used while selfplaying.
         Thus it is dealing with batches of size 1.
         """
         # run a birnn over the concatenation of the input embeddings and
         # language model hidden states
-        inpt_emb = self.word_encoder(inpt)
+        if wb_attack:
+            prev_inpt_emb = self.word_encoder(inpt)
+            #print(prev_inpt_emb.size())
+            sinpt_emb = o_inpt_emb[:,:,:256]
+            inpt_emb = torch.cat([prev_inpt_emb,sinpt_emb],0)
+            words=[]
+            words.append(self.word2var('YOU:').unsqueeze(1))
+            words.append(self.word2var('<selection>').unsqueeze(1))# there might be problem since we assume we always generate selection
+            post_inpt_emb = self.word_encoder(torch.cat(words))
+            inpt_emb = torch.cat([inpt_emb,post_inpt_emb],0)
+            #print(prev_inpt_emb.size(), lang_h.size())
+            #prev_inpt_emb = torch.cat([lang_h.unsqueeze(1), prev_inpt_emb], 2)
+        else:
+            inpt_emb = self.word_encoder(inpt)
+        #print(inpt_emb.size(),lang_h.size())
         h = torch.cat([lang_h.unsqueeze(1), inpt_emb], 2)
-        h = self.dropout(h)
+        
+        if not wb_attack:
+            h = self.dropout(h) # should we need dropout?????
 
         # runs selection rnn over the hidden state h
         attn_h = self.zero_hid(h.size(1), self.args.nhid_attn, copies=2)
@@ -266,15 +290,20 @@ class DialogModel(modules.CudaModule):
         return torch.cat(outs, 0), torch.cat(lang_hs, 0)
 
     def write(self, lang_h, ctx_h, max_words, temperature,
-            stop_tokens=STOP_TOKENS, resume=False):
+            stop_tokens=STOP_TOKENS, resume=False, wb_attack=False):
         """Generate a sentence word by word and feed the output of the
         previous timestep as input to the next.
         """
         outs, logprobs, lang_hs = [], [], []
+
         # remove batch dimension from the language and context hidden states
         lang_h = lang_h.squeeze(1)
         ctx_h = ctx_h.squeeze(1)
-
+        ############
+        if wb_attack:
+            list_lang_hs=[]
+            list_lang_hs.append(lang_h)
+        ##########
         if resume:
             inpt = None
         else:
@@ -290,7 +319,11 @@ class DialogModel(modules.CudaModule):
                 inpt_emb = torch.cat([self.word_encoder(inpt), ctx_h], 1)
                 # update RNN state with last word
                 lang_h = self.writer(inpt_emb, lang_h)
+
+                ######### lost gradient here
                 lang_hs.append(lang_h)
+                if wb_attack:
+                    list_lang_hs.append(lang_h)
 
             # decode words using the inverse of the word embedding matrix
             if max_words != 1:
@@ -305,15 +338,36 @@ class DialogModel(modules.CudaModule):
                     scores = scores.add(mask)
 
                 prob = F.softmax(scores,dim=0)
+
+
                 logprob = F.log_softmax(scores,dim=0)
 
                 # explicitly defining num_samples for pytorch 0.4.1
-                word = prob.multinomial(num_samples=1).detach()
+                word = prob.multinomial(num_samples=1).detach() # there introduce randomness
                 logprob = logprob.gather(0, word)
 
                 logprobs.append(logprob)
                 outs.append(word.view(word.size()[0], 1))
             else:
+                out = self.decoder(lang_h)
+                scores = F.linear(out, self.word_encoder.weight).div(temperature)
+                # subtract constant to avoid overflows in exponentiation
+                scores = scores.add(-scores.max().item()).squeeze(0)
+
+                # disable special tokens from being generated in a normal turns
+                if not resume:
+                    mask = Variable(self.special_token_mask)
+                    scores = scores.add(mask)
+
+                prob = F.softmax(scores,dim=0)
+
+                # design for whitebox attack
+                if wb_attack:
+                    _ , idx = prob.max(0, keepdim=True)
+                    selec_idx = self.word_dict.get_idx('<selection>')
+                    #loss = torch.clamp(prob[idx] - prob[selec_idx], min=0)
+                    loss = torch.clamp(scores[idx] - scores[selec_idx], min=0)
+                #else:
                 word = self.word_dict.get_idx('<selection>')
                 word = Variable(torch.LongTensor([word])).cuda()
                 outs.append(word.view(word.size()[0], 1))               
@@ -328,11 +382,15 @@ class DialogModel(modules.CudaModule):
         inpt_emb = torch.cat([self.word_encoder(inpt), ctx_h], 1)
         lang_h = self.writer(inpt_emb, lang_h)
         lang_hs.append(lang_h)
+        if wb_attack:
+            list_lang_hs.append(lang_h)
 
         # add batch dimension back
         lang_h = lang_h.unsqueeze(1)
-
-        return logprobs, torch.cat(outs), lang_h, torch.cat(lang_hs)
+        if wb_attack:
+            return logprobs, torch.cat(outs), lang_h, torch.cat(lang_hs), loss, list_lang_hs
+        else:
+            return logprobs, torch.cat(outs), lang_h, torch.cat(lang_hs)
 
     def score_sent(self, sent, lang_h, ctx_h, temperature):
         """Computes likelihood of a given sentence."""
