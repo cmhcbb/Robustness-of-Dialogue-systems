@@ -128,6 +128,38 @@ class DialogModel(modules.CudaModule):
         modules.init_cont(self.sel_encoder, self.args.init_range)
         modules.init_cont(self.sel_decoders, self.args.init_range)
 
+    def get_embedding(self, inpt, lang_h, ctx_h, prefix_token="THEM:"):
+        """Reads a given utterance."""
+        # inpt contains the pronounced utterance
+        # add a "THEM:" token to the start of the message
+        prefix = Variable(torch.LongTensor(1).unsqueeze(1))
+        prefix.data.fill_(self.word_dict.get_idx(prefix_token))
+        inpt = torch.cat([self.to_device(prefix), inpt])
+
+        # embed words
+        inpt_emb_o = self.word_encoder(inpt)
+        #inpt_emb_o = Variable(inpt_emb_o)
+        ### Minhao 
+        #should get here instead of exact words
+        #inpt_emb_o = Variable(inpt_emb_o) # to get the gradient from non-leaf variable restricted by pytorch
+        # append the context embedding to every input word embedding
+        ctx_h_rep = ctx_h.expand(inpt_emb_o.size(0), ctx_h.size(1), ctx_h.size(2))
+        inpt_emb = torch.cat([inpt_emb_o, ctx_h_rep], 2)
+
+        return inpt_emb
+        
+        if wb_attack:
+            inpt_emb = Variable(inpt_emb)
+            #print(inpt_emb.size())
+            inpt_emb.requires_grad=True
+        # finally read in the words
+        self.reader.flatten_parameters()
+        out, lang_h = self.reader(inpt_emb, lang_h)
+        if wb_attack:
+            return out,lang_h, inpt_emb, inpt_emb_o
+        else:
+            return out, lang_h
+
     def read(self, inpt, lang_h, ctx_h, prefix_token="THEM:",wb_attack=False):
         """Reads a given utterance."""
         # inpt contains the pronounced utterance

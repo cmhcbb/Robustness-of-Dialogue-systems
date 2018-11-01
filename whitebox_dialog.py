@@ -16,6 +16,7 @@ import data
 import utils
 import domain
 from torch.autograd import Variable
+import torch, random
 
 logging.basicConfig(format='%(asctime)s : %(levelname)s : %(filename)s : %(message)s', level=logging.INFO)
 
@@ -221,16 +222,32 @@ class Dialog(object):
         ####
         # get the final loss and do the back-propagation
         c=1
-        step_size = 1e-2   
+        step_size = 5e-2   
         #lang_hs[0].retain_grad()
         #print(words)
-
+        all_index_n = len(self.agents[0].model.word_dict)
+        all_index = torch.LongTensor(range(all_index_n)).cuda()
+        all_word_emb = self.agents[0].model.word_encoder(all_index)
+        threshold = 2.5
+        #print(all_word_emb.size())
         print(inpt_emb.size(),inpt)
 
-        iterations = 100
-        for _ in range(iterations):
+        def get_embedding(inpt):
+            prefix = Variable(torch.LongTensor(1).unsqueeze(1))
+            prefix.data.fill_(bob.model.word_dict.get_idx("THEM:"))
+            inpt = torch.cat([bob.model.to_device(prefix), inpt])
+            inpt_emb = bob.model.word_encoder(inpt)
+            return inpt_emb
+        changed = False
+        iterations = 200
+        mask= [0] * (inpt_emb.size()[0]-1)
+        for iter_idx in range(iterations):
             #print(inpt,len(bob.lang_hs),bob.lang_h.size())
             #print(len(bob.lang_hs))
+            if changed:
+                print(inpt)
+                inpt_emb = bob.model.get_embedding(inpt,bob.lang_h,bob.ctx_h)
+                changed = False
             inpt_emb.retain_grad()
             #bob.lang_hs[-1].retain_grad()
             bob.read_emb(inpt_emb, inpt)
@@ -243,6 +260,10 @@ class Dialog(object):
             bob_choice, classify_loss, _ = bob.choose(inpt_emb=inpt_emb,wb_attack=True)
             #print(len(bob.lang_hs))
             t_loss = c*loss1 + classify_loss
+            if (iter_idx+1)%10==0 and loss1==0.0 and classify_loss<=0.0:
+                print("get legimate adversarial example")
+                print(bob._decode(inpt,bob.model.word_dict))
+                break
             #t_loss = loss1
             #bob.lang_hs[2].retain_grad()
             #logits.retain_grad()
@@ -259,6 +280,33 @@ class Dialog(object):
             #print(inpt_emb.grad[2])
             #inpt_emb.grad[0][:][:]=0
             inpt_emb = inpt_emb - step_size * inpt_emb.grad
+
+            # projection
+            if iter_idx%10==0:
+                for emb_idx in range(1,inpt_emb.size()[0]):
+                    rep_candidate = []
+                    dis_a=[] 
+                    for r_idx in range(all_index_n):
+                        if r_idx==inpt[emb_idx-1].item():
+                            continue
+                        dis=torch.norm(inpt_emb[emb_idx][:,:256]-all_word_emb[r_idx]).item()
+                        if dis< threshold:
+                            rep_candidate.append(r_idx)
+                            if not dis_a:
+                                continue
+                            elif dis<min(dis_a):
+                                min_idx = r_idx
+
+                        dis_a.append(dis)
+                    #print(np.argmin(dis_a),min(dis_a))
+                    if rep_candidate and mask[emb_idx-1]==0:
+                        #mask[emb_idx-1]=1
+                        #temp= random.choice(rep_candidate)
+                        temp = min_idx
+                        inpt[emb_idx-1]=temp
+                        changed = True
+                    #break
+            #print(rep_candidate)
 
             bob.lang_hs = lang_hs.copy()
             bob.lang_h = lang_h.clone()
