@@ -148,6 +148,20 @@ class Dialog(object):
     def show_metrics(self):
         return ' '.join(['%s=%s' % (k, v) for k, v in self.metrics.dict().items()])
 
+    def get_loss(self, inpt, words, lang_hs, lang_h, c=1):
+        bob = self.agents[1]
+        inpt_emb = bob.model.get_embedding(inpt,bob.lang_h,bob.ctx_h)
+        bob.read_emb(inpt_emb, inpt)
+        loss1, bob_out, _ = bob.write_selection(wb_attack=True)
+        bob.words = words.copy()
+        bob_choice, classify_loss, _ = bob.choose(inpt_emb=inpt_emb,wb_attack=True)
+        t_loss = c*loss1 + classify_loss
+        #t_loss.backward(retain_graph=True)
+        bob.lang_hs = lang_hs.copy()
+        bob.lang_h = lang_h.clone()
+        return t_loss.item(), loss1, classify_loss
+
+
     def run(self, ctxs, logger):
         """Runs one instance of the dialogue."""
         assert len(self.agents) == len(ctxs)
@@ -228,91 +242,110 @@ class Dialog(object):
         all_index_n = len(self.agents[0].model.word_dict)
         all_index = torch.LongTensor(range(all_index_n)).cuda()
         all_word_emb = self.agents[0].model.word_encoder(all_index)
-        threshold = 2.5
+        threshold = 3
         #print(all_word_emb.size())
         print(inpt_emb.size(),inpt)
+        
+        if inpt_emb.size()[0]>3:
+    
+            iterations = 1000
+            #mask= [0] * (inpt_emb.size()[0]-1)
+            Flag=False
+            for iter_idx in range(iterations):
+                #print(inpt,len(bob.lang_hs),bob.lang_h.size())
+                #print(len(bob.lang_hs))
+                if (iter_idx+1)%1==0 and Flag:                                
+                    inpt_emb = bob.model.get_embedding(inpt,bob.lang_h,bob.ctx_h)
+                    #changed = False
+                inpt_emb.retain_grad()
+                #bob.lang_hs[-1].retain_grad()
+                bob.read_emb(inpt_emb, inpt)
+                #print(len(bob.lang_hs))
+                loss1, bob_out, _ = bob.write_selection(wb_attack=True)
+                #print(len(bob.lang_hs))
+                #print(len(lang_hs))
+                bob.words = words.copy()
+                #print(len(lang_hs))
+                bob_choice, classify_loss, _ = bob.choose(inpt_emb=inpt_emb,wb_attack=True)
+                #print(len(bob.lang_hs))
+                t_loss = c*loss1 + classify_loss
 
-        def get_embedding(inpt):
-            prefix = Variable(torch.LongTensor(1).unsqueeze(1))
-            prefix.data.fill_(bob.model.word_dict.get_idx("THEM:"))
-            inpt = torch.cat([bob.model.to_device(prefix), inpt])
-            inpt_emb = bob.model.word_encoder(inpt)
-            return inpt_emb
-        changed = False
-        iterations = 200
-        mask= [0] * (inpt_emb.size()[0]-1)
-        for iter_idx in range(iterations):
-            #print(inpt,len(bob.lang_hs),bob.lang_h.size())
-            #print(len(bob.lang_hs))
-            if changed:
-                print(inpt)
-                inpt_emb = bob.model.get_embedding(inpt,bob.lang_h,bob.ctx_h)
-                changed = False
-            inpt_emb.retain_grad()
-            #bob.lang_hs[-1].retain_grad()
-            bob.read_emb(inpt_emb, inpt)
-            #print(len(bob.lang_hs))
-            loss1, bob_out, _ = bob.write_selection(wb_attack=True)
-            #print(len(bob.lang_hs))
-            #print(len(lang_hs))
-            bob.words = words.copy()
-            #print(len(lang_hs))
-            bob_choice, classify_loss, _ = bob.choose(inpt_emb=inpt_emb,wb_attack=True)
-            #print(len(bob.lang_hs))
-            t_loss = c*loss1 + classify_loss
-            if (iter_idx+1)%10==0 and loss1==0.0 and classify_loss<=0.0:
-                print("get legimate adversarial example")
-                print(bob._decode(inpt,bob.model.word_dict))
-                break
-            #t_loss = loss1
-            #bob.lang_hs[2].retain_grad()
-            #logits.retain_grad()
-            #t_loss = classify_loss
-            t_loss.backward(retain_graph=True)
-            #print(len(bob.lang_hs))
-            
-            #print(logits.grad)
-            print(t_loss.item(),loss1.item(),classify_loss.item())
-        #print(inpt_emb.size())
-            #print(inpt_emb.grad.size())
-            inpt_emb.grad[:,:,256:] = 0
-            inpt_emb.grad[0,:,:] = 0
-            #print(inpt_emb.grad[2])
-            #inpt_emb.grad[0][:][:]=0
-            inpt_emb = inpt_emb - step_size * inpt_emb.grad
+                if (iter_idx+1)%1==0:
+                    print(t_loss.item(), loss1.item(), classify_loss.item())
+                    if loss1==0.0 and classify_loss<=0.0:
+                        print("get legimate adversarial example")
+                        print(bob._decode(inpt,bob.model.word_dict))      ### bug still?????
+                        break
+                #t_loss = loss1
+                #bob.lang_hs[2].retain_grad()
+                #logits.retain_grad()
+                #t_loss = classify_loss
+                t_loss.backward(retain_graph=True)
+                #print(len(bob.lang_hs))
+                
+                #print(logits.grad)
+                #print(t_loss.item(),loss1.item(),classify_loss.item())
+            #print(inpt_emb.size())
+                #print(inpt_emb.grad.size())
+                inpt_emb.grad[:,:,256:] = 0
+                inpt_emb.grad[0,:,:] = 0
+                #print(inpt_emb.grad[2])
+                #inpt_emb.grad[0][:][:]=0
+                inpt_emb = inpt_emb - step_size * inpt_emb.grad
+                bob.lang_hs = lang_hs.copy()
+                bob.lang_h = lang_h.clone()
 
-            # projection
-            if iter_idx%10==0:
-                for emb_idx in range(1,inpt_emb.size()[0]):
-                    rep_candidate = []
-                    dis_a=[] 
-                    for r_idx in range(all_index_n):
-                        if r_idx==inpt[emb_idx-1].item():
-                            continue
-                        dis=torch.norm(inpt_emb[emb_idx][:,:256]-all_word_emb[r_idx]).item()
-                        if dis< threshold:
-                            rep_candidate.append(r_idx)
-                            if not dis_a:
+                # projection
+                min_inpt = None
+                temp_inpt = inpt.clone()
+                if iter_idx%1==0:
+                    for emb_idx in range(1,inpt_emb.size()[0]):
+                        rep_candidate = []
+                        dis_a=[] 
+                        for r_idx in range(1,all_index_n): # excluding <eos>
+                            if r_idx==inpt[emb_idx-1].item():
+                                rep_candidate.append(r_idx)
                                 continue
-                            elif dis<min(dis_a):
-                                min_idx = r_idx
+                            dis=torch.norm(inpt_emb[emb_idx][:,:256]-all_word_emb[r_idx]).item()
+                            if dis< threshold:
+                                rep_candidate.append(r_idx)
+                                if not dis_a:
+                                    continue
+                                elif dis<min(dis_a):
+                                    min_idx = r_idx
 
-                        dis_a.append(dis)
-                    #print(np.argmin(dis_a),min(dis_a))
-                    if rep_candidate and mask[emb_idx-1]==0:
-                        #mask[emb_idx-1]=1
-                        #temp= random.choice(rep_candidate)
-                        temp = min_idx
-                        inpt[emb_idx-1]=temp
-                        changed = True
-                    #break
-            #print(rep_candidate)
+                            dis_a.append(dis)
+                        #print(np.argmin(dis_a),min(dis_a))
+                        if rep_candidate:
+                            #mask[emb_idx-1]=1
+                            #temp= random.choice(rep_candidate)
+                            min_loss = t_loss.item()
+                            for candi in rep_candidate:
+                                temp_inpt[emb_idx-1]=candi
+                                loss,_,_ = self.get_loss(temp_inpt, words, lang_hs, lang_h)
+                                if loss<min_loss:
+                                    min_loss = loss
+                                    min_inpt = temp_inpt.clone()
+                        else:
+                            continue
+                    if min_inpt is not None:
+                        inpt = min_inpt.clone()
+                        print(inpt)
+                        Flag=True
+                    else:
+                        Flag=False
+                        #break
+                #print(rep_candidate)
+            #print(t_loss,lang_hs[0].grad)
+            print("attack finished")
+        else:
+            bob.read_emb(inpt_emb, inpt)
+            _, bob_out, _ = bob.write_selection(wb_attack=True)
+            bob.words = words.copy()
+            bob_choice, _, _ = bob.choose(inpt_emb=inpt_emb,wb_attack=True)
 
-            bob.lang_hs = lang_hs.copy()
-            bob.lang_h = lang_h.clone()
-            
-        #print(t_loss,lang_hs[0].grad)
-        print("attack finished")
+        logger.dump_sent(self.agents[0].name,bob._decode(inpt,bob.model.word_dict))
+        logger.dump_sent(bob.name,['<selection>'])
         #####
         choices.append(bob_choice)
         alice_choice = bob_choice[:]
@@ -360,7 +393,7 @@ class Dialog(object):
         for agent, reward in zip(self.agents, rewards):
             logger.dump_reward(agent.name, agree, reward)
             logging.debug("%s : %s : %s" % (str(agent.name), str(agree), str(rewards)))
-            agent.update(agree, 5-classify_loss.item())
+            #agent.update(agree, 5-classify_loss.item())
 
 
         if agree:
