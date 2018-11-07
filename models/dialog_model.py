@@ -227,31 +227,46 @@ class DialogModel(modules.CudaModule):
         outs = [decoder.forward(h) for decoder in self.sel_decoders]
         return torch.cat(outs)
 
-    def generate_choice_logits(self, inpt, lang_h, ctx_h, o_inpt_emb=None, wb_attack=True):
+    def generate_choice_logits(self, inpt, lang_h, ctx_h, o_inpt_emb=None, wb_attack=True, bob_ends=True, bob_out=None):
         """Similar to forward_selection, but is used while selfplaying.
         Thus it is dealing with batches of size 1.
         """
         # run a birnn over the concatenation of the input embeddings and
         # language model hidden states
         if wb_attack:
-            prev_inpt_emb = self.word_encoder(inpt)
-            #print(prev_inpt_emb.size())
-            sinpt_emb = o_inpt_emb[:,:,:256]
-            inpt_emb = torch.cat([prev_inpt_emb,sinpt_emb],0)
-            words=[]
-            words.append(self.word2var('YOU:').unsqueeze(1))
-            words.append(self.word2var('<selection>').unsqueeze(1))# there might be problem since we assume we always generate selection
-            post_inpt_emb = self.word_encoder(torch.cat(words))
-            inpt_emb = torch.cat([inpt_emb,post_inpt_emb],0)
+            if bob_ends:
+                prev_inpt_emb = self.word_encoder(inpt)
+                #print(prev_inpt_emb.size())
+                sinpt_emb = o_inpt_emb[:,:,:256]
+                inpt_emb = torch.cat([prev_inpt_emb,sinpt_emb],0)
+                words=[]
+                words.append(self.word2var('YOU:').unsqueeze(1))
+                words.append(self.word2var('<selection>').unsqueeze(1))# there might be problem since we assume we always generate selection
+                post_inpt_emb = self.word_encoder(torch.cat(words))
+                inpt_emb = torch.cat([inpt_emb,post_inpt_emb],0)
+            else:
+                prev_inpt_emb = self.word_encoder(inpt)
+                #print(prev_inpt_emb.size())
+                sinpt_emb = o_inpt_emb[:,:,:256]
+                inpt_emb = torch.cat([prev_inpt_emb,sinpt_emb],0)
+                words=[]
+                words.append(self.word2var('YOU:').unsqueeze(1))
+                words.append(bob_out)
+                words.append(self.word2var('THEM:').unsqueeze(1))
+                words.append(self.word2var('<selection>').unsqueeze(1))# there might be problem since we assume we always generate selection
+                #print(words)
+                post_inpt_emb = self.word_encoder(torch.cat(words))
+                inpt_emb = torch.cat([inpt_emb,post_inpt_emb],0)                
             #print(prev_inpt_emb.size(), lang_h.size())
             #prev_inpt_emb = torch.cat([lang_h.unsqueeze(1), prev_inpt_emb], 2)
         else:
             inpt_emb = self.word_encoder(inpt)
+
         #print(inpt_emb.size(),lang_h.size())
         h = torch.cat([lang_h.unsqueeze(1), inpt_emb], 2)
         
         if not wb_attack:
-            h = self.dropout(h) # should we need dropout?????
+            h = self.dropout(h) 
 
         # runs selection rnn over the hidden state h
         attn_h = self.zero_hid(h.size(1), self.args.nhid_attn, copies=2)

@@ -149,7 +149,7 @@ class LstmAgent(Agent):
         #return prev_read_lang_hs, prev_read_lang_h
 
 
-    def write(self):
+    def write(self, bob_ends=True):
         # generate a new utterance
         _, outs, self.lang_h, lang_hs = self.model.write(self.lang_h, self.ctx_h,
             100, self.args.temperature)
@@ -161,7 +161,10 @@ class LstmAgent(Agent):
         self.words.append(outs)
         assert (torch.cat(self.words).size()[0] == torch.cat(self.lang_hs).size()[0])
         # decode into English words
-        return self._decode(outs, self.model.word_dict)
+        if bob_ends:
+            return self._decode(outs, self.model.word_dict)
+        else:
+            return outs
 
         # add selection mark 
     #####
@@ -218,9 +221,10 @@ class LstmAgent(Agent):
 
     ####
 
-    def _choose(self, lang_hs=None, words=None, sample=False, inpt_emb=None, wb_attack=False):
+    def _choose(self, lang_hs=None, words=None, sample=False, inpt_emb=None, wb_attack=False, bob_ends=True, bob_out=None):
         # get all the possible choices
         #print(self.context)
+
         choices = self.domain.generate_choices(self.context)
         #print(len(choices), len(self.context))
         #print(choices)
@@ -255,12 +259,13 @@ class LstmAgent(Agent):
         #print(len(choices))
         # concatenate the list of the hidden states into one tensor
         lang_hs = lang_hs if lang_hs is not None else torch.cat(self.lang_hs)
-
+        #print(lang_hs.size())
         # concatenate all the words into one tensor
         words = words if words is not None else torch.cat(self.words)
+        #print(words.size())
         # logits for each of the item
         if wb_attack:
-            logits = self.model.generate_choice_logits(words, lang_hs, self.ctx_h, inpt_emb, wb_attack)
+            logits = self.model.generate_choice_logits(words, lang_hs, self.ctx_h, inpt_emb, wb_attack, bob_ends, bob_out)
         else:
             logits = self.model.generate_choice_logits(words, lang_hs, self.ctx_h)
         #print(logits)
@@ -310,8 +315,8 @@ class LstmAgent(Agent):
         #print(choices[idx.data[0]])
         return choices[idx.item()][:self.domain.selection_length()], logprob, p_agree.item(), class_loss, choice_logit
 
-    def choose(self, inpt_emb=None, wb_attack=False):
-        choice, _, _, class_loss, choice_logit = self._choose(inpt_emb=inpt_emb, wb_attack=wb_attack)
+    def choose(self, inpt_emb=None, wb_attack=False, bob_ends=True, bob_out=None):
+        choice, _, _, class_loss, choice_logit = self._choose(inpt_emb=inpt_emb, wb_attack=wb_attack, bob_ends=bob_ends, bob_out=bob_out)
         return choice, class_loss, choice_logit
 
 
