@@ -21,7 +21,7 @@ import torch.nn as nn
 from nograd_agent import LstmAgent, LstmRolloutAgent, BatchedRolloutAgent
 import utils
 from utils import ContextGenerator
-from nograd_dialog import Dialog, DialogLogger
+from stopattack_dialog import Dialog, DialogLogger
 from models.dialog_model import DialogModel
 
 
@@ -38,6 +38,9 @@ class SelfPlay(object):
         # goes through the list of contexes and kicks off a dialogue
         for ctxs in self.ctx_gen.iter():
             n += 1
+            #if n<39:
+            #    continue
+            print("dialog:",n)
             self.logger.dump('=' * 80)
             self.dialog.run(ctxs, self.logger)
             self.logger.dump('=' * 80)
@@ -99,12 +102,10 @@ def main():
     alice_model = utils.load_model(args.alice_model_file)
     alice_ty = get_agent_type(alice_model, args.smart_alice, args.fast_rollout)
     alice = alice_ty(alice_model, args, name='Alice')
-    alice_model.train()
 
     bob_model = utils.load_model(args.bob_model_file)
     bob_ty = get_agent_type(bob_model, args.smart_bob, args.fast_rollout)
     bob = bob_ty(bob_model, args, name='Bob')
-    bob_model.train()
     dialog = Dialog([alice, bob], args)
     logger = DialogLogger(verbose=args.verbose, log_file=args.log_file)
     ctx_gen = ContextGenerator(args.context_file)

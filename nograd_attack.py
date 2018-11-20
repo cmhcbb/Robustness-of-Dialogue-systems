@@ -99,12 +99,10 @@ def main():
     alice_model = utils.load_model(args.alice_model_file)
     alice_ty = get_agent_type(alice_model, args.smart_alice, args.fast_rollout)
     alice = alice_ty(alice_model, args, name='Alice')
-    alice_model.train()
 
     bob_model = utils.load_model(args.bob_model_file)
     bob_ty = get_agent_type(bob_model, args.smart_bob, args.fast_rollout)
     bob = bob_ty(bob_model, args, name='Bob')
-    bob_model.train()
     dialog = Dialog([alice, bob], args)
     logger = DialogLogger(verbose=args.verbose, log_file=args.log_file)
     ctx_gen = ContextGenerator(args.context_file)

@@ -200,6 +200,7 @@ class DialogModel(modules.CudaModule):
         """Forwards selection pass."""
         # run a birnn over the concatenation of the input embeddings and
         # language model hidden states
+        
         inpt_emb = self.word_encoder(inpt)
         h = torch.cat([lang_h, inpt_emb], 2)
         h = self.dropout(h)
@@ -227,7 +228,7 @@ class DialogModel(modules.CudaModule):
         outs = [decoder.forward(h) for decoder in self.sel_decoders]
         return torch.cat(outs)
 
-    def generate_choice_logits(self, inpt, lang_h, ctx_h, o_inpt_emb=None, wb_attack=True, bob_ends=True, bob_out=None):
+    def generate_choice_logits(self, inpt, lang_h, ctx_h, o_inpt_emb=None, wb_attack=False, bob_ends=True, bob_out=None):
         """Similar to forward_selection, but is used while selfplaying.
         Thus it is dealing with batches of size 1.
         """
@@ -265,8 +266,8 @@ class DialogModel(modules.CudaModule):
         #print(inpt_emb.size(),lang_h.size())
         h = torch.cat([lang_h.unsqueeze(1), inpt_emb], 2)
         
-        if not wb_attack:
-            h = self.dropout(h) 
+        #if not wb_attack:
+        #    h = self.dropout(h) 
 
         # runs selection rnn over the hidden state h
         attn_h = self.zero_hid(h.size(1), self.args.nhid_attn, copies=2)
@@ -390,9 +391,13 @@ class DialogModel(modules.CudaModule):
                 logprob = F.log_softmax(scores,dim=0)
 
                 # explicitly defining num_samples for pytorch 0.4.1
+                #if wb_attack:
+                #    word = prob.max(0, keepdim=True)
+                #    logprobs = None
+                #    print(word)
+                #else:
                 word = prob.multinomial(num_samples=1).detach() # there introduce randomness
                 logprob = logprob.gather(0, word)
-
                 logprobs.append(logprob)
                 outs.append(word.view(word.size()[0], 1))
             else:
@@ -438,6 +443,51 @@ class DialogModel(modules.CudaModule):
             return logprobs, torch.cat(outs), lang_h, torch.cat(lang_hs), loss, list_lang_hs
         else:
             return logprobs, torch.cat(outs), lang_h, torch.cat(lang_hs)
+
+    def write_rl(self, lang_h, ctx_h, sentence):
+        outs, logprobs, lang_hs = [], [], []
+
+        # remove batch dimension from the language and context hidden states
+        lang_h = lang_h.squeeze(1)
+        ctx_h = ctx_h.squeeze(1)
+            # if we start a new sentence, prepend it with 'YOU:'
+        inpt = Variable(torch.LongTensor(1))
+        inpt.data.fill_(self.word_dict.get_idx('YOU:'))
+        inpt = self.to_device(inpt)      
+        for word_rl in sentence:
+            if inpt is not None:
+                # add the context to the word embedding
+                inpt_emb = torch.cat([self.word_encoder(inpt), ctx_h], 1)
+                # update RNN state with last word
+                lang_h = self.writer(inpt_emb, lang_h)
+
+                ######### lost gradient here
+            lang_hs.append(lang_h)
+            out = self.decoder(lang_h)
+            #scores = F.linear(out, self.word_encoder.weight).div(temperature)
+            # subtract constant to avoid overflows in exponentiation
+            #scores = scores.add(-scores.max().item()).squeeze(0)
+
+            # disable special tokens from being generated in a normal turns
+            #if not resume:
+            #    mask = Variable(self.special_token_mask)
+            #    scores = scores.add(mask)
+
+            #prob = F.softmax(scores,dim=0)
+            word = self.word_dict.get_idx(word_rl)
+            word = Variable(torch.LongTensor([word])).cuda()
+            outs.append(word.view(word.size()[0], 1))               
+            inpt = word
+
+        #outs = outs[0:len(outs)-1]
+        # update the hidden state with the <eos> token
+        inpt_emb = torch.cat([self.word_encoder(inpt), ctx_h], 1)
+        lang_h = self.writer(inpt_emb, lang_h)
+        lang_hs.append(lang_h)
+        # add batch dimension back
+        lang_h = lang_h.unsqueeze(1)
+        return logprobs, torch.cat(outs), lang_h, torch.cat(lang_hs)
+
 
     def score_sent(self, sent, lang_h, ctx_h, temperature):
         """Computes likelihood of a given sentence."""

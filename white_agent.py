@@ -111,9 +111,20 @@ class LstmAgent(Agent):
         # current hidden state of the language rnn
         self.lang_h = self.model.zero_hid(1)
 
-    def read(self, inpt):
-        inpt = self._encode(inpt, self.model.word_dict)
-        lang_hs, self.lang_h = self.model.read(Variable(inpt), self.lang_h, self.ctx_h)
+    def read(self, inpt,wb_attack=False, f_endode=True):
+        if f_endode:
+            inpt = self._encode(inpt, self.model.word_dict)
+        if wb_attack:
+            lang_hs, lang_h, input_emb, input_emb_o = self.model.read(Variable(inpt), self.lang_h, self.ctx_h, wb_attack=wb_attack)
+            #print(input_emb.size(),input_emb_o.size())
+            #print(input_emb.requires_grad)
+            import copy
+            prev_read_lang_hs = copy.copy(self.lang_hs)
+            prev_read_lang_h = self.lang_h.clone()
+            prev_words = copy.copy(self.words)
+            return input_emb, inpt, prev_read_lang_hs, prev_read_lang_h, prev_words ####### There exists a problem. The input_emb includes the context information. However we want pure language    
+        else:
+            lang_hs, self.lang_h = self.model.read(Variable(inpt), self.lang_h, self.ctx_h)
         # append new hidded states to the current list of the hidden states
         self.lang_hs.append(lang_hs.squeeze(1))
         # first add the special 'THEM:' token
@@ -122,7 +133,25 @@ class LstmAgent(Agent):
         self.words.append(Variable(inpt))
         assert (torch.cat(self.words).size()[0] == torch.cat(self.lang_hs).size()[0])
 
-    def write(self):
+        #if wb_attack:
+        #    return input_emb ####### There exists a problem. The input_emb includes the context information. However we want pure language
+
+    def read_emb(self, inpt_emb, inpt):
+        inpt = self._encode(inpt, self.model.word_dict)
+        self.model.reader.flatten_parameters()
+        #print(inpt_emb.size(),self.lang_h.size())
+        lang_hs, self.lang_h = self.model.reader(inpt_emb, self.lang_h)
+        # append new hidded states to the current list of the hidden states
+        self.lang_hs.append(lang_hs.squeeze(1))
+        # first add the special 'THEM:' token
+        self.words.append(self.model.word2var('THEM:').unsqueeze(1))
+        # then read the utterance
+        self.words.append(Variable(inpt))
+        assert (torch.cat(self.words).size()[0] == torch.cat(self.lang_hs).size()[0])
+        #return prev_read_lang_hs, prev_read_lang_h
+
+
+    def write(self, bob_ends=True):
         # generate a new utterance
         _, outs, self.lang_h, lang_hs = self.model.write(self.lang_h, self.ctx_h,
             100, self.args.temperature)
@@ -134,13 +163,22 @@ class LstmAgent(Agent):
         self.words.append(outs)
         assert (torch.cat(self.words).size()[0] == torch.cat(self.lang_hs).size()[0])
         # decode into English words
-        return self._decode(outs, self.model.word_dict)
+        if bob_ends:
+            return self._decode(outs, self.model.word_dict)
+        else:
+            return outs
 
         # add selection mark 
     #####
-    def write_selection(self):
-        _, outs, self.lang_h, lang_hs = self.model.write(self.lang_h, self.ctx_h,
-            1, self.args.temperature)
+
+    def write_selection(self, wb_attack=False):
+        if wb_attack:
+            _, outs, self.lang_h, lang_hs, loss1, list_lang_hs = self.model.write(self.lang_h, self.ctx_h,
+                1, self.args.temperature, wb_attack=wb_attack)
+            #self.lang_hs.append(lang_hs[1:])            
+        else:
+            _, outs, self.lang_h, lang_hs = self.model.write(self.lang_h, self.ctx_h,
+                1, self.args.temperature)
         # append log probs from the generated words
         #self.logprobs.extend(logprobs)
         self.lang_hs.append(lang_hs)
@@ -149,15 +187,49 @@ class LstmAgent(Agent):
         # then append the utterance
         self.words.append(outs)
         assert (torch.cat(self.words).size()[0] == torch.cat(self.lang_hs).size()[0])
-        return self._decode(outs, self.model.word_dict)
+        if wb_attack:
+            out = self._decode(outs, self.model.word_dict)
+            return loss1, out, list_lang_hs
+        else:
+            return self._decode(outs, self.model.word_dict)
+    
+    def write_white(self,bob):
+        #_, outs, self.lang_h, lang_hs = self.model.write(self.lang_h, self.ctx_h,
+        #    1, self.args.temperature)
+        _, outs, self.lang_h, lang_hs = self.model.write(self.lang_h, self.ctx_h,
+            100, self.args.temperature)        
+        ###### get a longer sentence ######
+        # append log probs from the generated words
+        #self.logprobs.extend(logprobs)
+        self.lang_hs.append(lang_hs)
+        # first add the special 'YOU:' token
+        self.words.append(self.model.word2var('YOU:').unsqueeze(1))
+        # then append the utterance
+        self.words.append(outs)
+        #print(outs)
+        assert (torch.cat(self.words).size()[0] == torch.cat(self.lang_hs).size()[0])
+        out = self._decode(outs, self.model.word_dict)
+        print(out)
+        inpt_emb, inpt, lang_hs, lang_h, words = bob.read(out,wb_attack=True)
+        #loss1, bob_out, lang_hs = bob.write_selection(wb_attack=True)
+        #return  bob_out, loss1, inpt_emb, lang_hs
+        return inpt_emb, inpt, lang_hs, lang_h, words
+
+
+
+
+
+
+
     ####
 
-    def _choose(self, lang_hs=None, words=None, sample=False, flag=False):
+    def _choose(self, lang_hs=None, words=None, sample=False, inpt_emb=None, wb_attack=False, bob_ends=True, bob_out=None):
         # get all the possible choices
         #print(self.context)
+
         choices = self.domain.generate_choices(self.context)
         #print(len(choices), len(self.context))
-
+        #print(choices)
         def score_choices(choice, ctx, ctx2):
             def _to_int(x):
                 try:
@@ -189,24 +261,30 @@ class LstmAgent(Agent):
         #print(len(choices))
         # concatenate the list of the hidden states into one tensor
         lang_hs = lang_hs if lang_hs is not None else torch.cat(self.lang_hs)
+        #print(lang_hs.size())
         # concatenate all the words into one tensor
         words = words if words is not None else torch.cat(self.words)
+        #print(words.size())
         # logits for each of the item
-        logits = self.model.generate_choice_logits(words, lang_hs, self.ctx_h)
+        if wb_attack:
+            logits = self.model.generate_choice_logits(words, lang_hs, self.ctx_h, inpt_emb, wb_attack, bob_ends, bob_out)
+        else:
+            logits = self.model.generate_choice_logits(words, lang_hs, self.ctx_h)
         #print(logits)
         # construct probability distribution over only the valid choices
         choices_logits = []
         for i in range(self.domain.selection_length()):
             idxs = [self.model.item_dict.get_idx(c[i]) for c in choices]
+            #print(idxs)
             idxs = Variable(torch.from_numpy(np.array(idxs)))
             idxs = self.model.to_device(idxs)
             choices_logits.append(torch.gather(logits[i], 0, idxs).unsqueeze(1))
-
+        #print(torch.cat(choices_logits,1))
         choice_logit = torch.sum(torch.cat(choices_logits, 1), 1, keepdim=False)
         #print(choice_logit, choice_score)
         # subtract the max to softmax more stable
         #o_choice_logit = choice_logit
-        choice_logit = choice_logit.sub(choice_logit.max().item())
+        choice_logit = choice_logit.sub(choice_logit.max().item())        ###problem??
         prob = F.softmax(choice_logit,dim=0)
         #print(prob)
         if sample:
@@ -220,24 +298,28 @@ class LstmAgent(Agent):
             logprob = None
 
         p_agree = prob[idx.data[0]]
-        valid_choice = max(prob[valid_set])
-
-        valid_idx = torch.argmax(prob[valid_set])
+        
+        #valid_choice = max(prob[valid_set])
+        valid_choice = max(choice_logit[valid_set])
+        #valid_idx = torch.argmax(prob[valid_set])
+        valid_idx = torch.argmax(choice_logit[valid_set])
         #print(valid_choice)
         #if flag:
-            #class_loss = 5 * (prob[idx.item()] - valid_choice)/(choice_scores[valid_set[valid_idx.item()]])
-        class_loss = 5 * (prob[idx.item()] - valid_choice)/(choice_scores[valid_set[valid_idx.item()]])        
+        #class_loss = 5 * (prob[idx.item()] - valid_choice)/(choice_scores[valid_set[valid_idx.item()]])
+        #class_loss = 5 * (prob[idx.item()] - valid_choice)
+        #class_loss = 1 * (prob[idx.item()] - valid_choice)-(choice_scores[valid_set[valid_idx.item()]])
+        class_loss = 1 * (choice_logit[idx.item()] - valid_choice)-(choice_scores[valid_set[valid_idx.item()]])        
         #else:
             #class_loss = o_choice_logit[idx.item()] - o_choice_logit[-3]            
         #print(choices[0])
         #print(choices[idx.item()])
         # Pick only your choice
         #print(choices[idx.data[0]])
-        return choices[idx.item()][:self.domain.selection_length()], logprob, p_agree.item(), class_loss
+        return choices[idx.item()][:self.domain.selection_length()], logprob, p_agree.item(), class_loss, choice_logit
 
-    def choose(self, flag=False):
-        choice, _, _, class_loss = self._choose(flag=flag)
-        return choice, class_loss
+    def choose(self, inpt_emb=None, wb_attack=False, bob_ends=True, bob_out=None):
+        choice, _, _, class_loss, choice_logit = self._choose(inpt_emb=inpt_emb, wb_attack=wb_attack, bob_ends=bob_ends, bob_out=bob_out)
+        return choice, class_loss, choice_logit
 
 
 class LstmRolloutAgent(LstmAgent):

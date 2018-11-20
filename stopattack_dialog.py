@@ -16,7 +16,7 @@ import data
 import utils
 import domain
 from torch.autograd import Variable
-import torch, random
+import torch, random, copy
 
 logging.basicConfig(format='%(asctime)s : %(levelname)s : %(filename)s : %(message)s', level=logging.INFO)
 
@@ -148,29 +148,143 @@ class Dialog(object):
     def show_metrics(self):
         return ' '.join(['%s=%s' % (k, v) for k, v in self.metrics.dict().items()])
 
-    def get_loss(self, inpt, words, lang_hs, lang_h, c=1, bob_ends=True):
-        bob = self.agents[1]
-        inpt_emb = bob.model.get_embedding(inpt,bob.lang_h,bob.ctx_h)
-        bob.read_emb(inpt_emb, inpt)
+    def get_loss(self, inpt, words, lang_hs, lang_h, c=1, bob_ends=True, bob_out=None):
+        bob=self.agents[1]
+        bob.read(inpt, f_encode=False)
         if bob_ends:
             loss1, bob_out, _ = bob.write_selection(wb_attack=True)
-            bob.words = words.copy()
-            bob_choice, classify_loss, _ = bob.choose(inpt_emb=inpt_emb,wb_attack=True)
+            bob_choice, classify_loss, _ = bob.choose()
             t_loss = c*loss1 + classify_loss
         else:
+            #if bob_out is None:
             bob_out = bob.write(bob_ends)
-            out = self.agents[0].write_selection()
+            _,out,_ = self.agents[0].write_selection(wb_attack=True, alice=True)
             bob.read(out)
-            bob.words = words.copy()
-            bob_choice, classify_loss, _ = bob.choose(inpt_emb=inpt_emb,bob_ends=bob_ends, bob_out=bob_out, wb_attack=True)
+            bob_choice, classify_loss, _ = bob.choose()
             t_loss = classify_loss                      
         #t_loss.backward(retain_graph=True)
-        bob.lang_hs = lang_hs.copy()
+        bob.words = copy.copy(words)
+        bob.lang_hs = copy.copy(lang_hs)
         bob.lang_h = lang_h.clone()
         if bob_ends:
-            return t_loss.item(), loss1, classify_loss
+            return t_loss.item(), loss1.item(), classify_loss.item(), bob_out, bob_choice
         else:
-            return t_loss.item()
+            return t_loss.item(), bob_out, bob_choice
+            #return t_loss, None, bob_choice
+
+    def attack(self, inpt, lang_hs, lang_h, words, bob_ends):
+        bob = self.agents[1]
+
+
+        #class_losses = []
+        # generate choices for each of the agents
+        #flag_loss=False
+        
+        c=1
+        #print(words)
+        all_index_n = len(self.agents[0].model.word_dict)
+    
+        #print(inpt)
+        
+        #fixed_lang_h = bob.lang_h.copy()
+        fixed_ctx_h = bob.ctx_h.clone() 
+
+        if True:
+            iterations = 3
+            #mask= [0] * (inpt_emb.size()[0]-1)
+            for iter_idx in range(iterations):
+                # projection
+                min_inpt = None
+                #temp_inpt = inpt.clone()
+                min_loss_a = []
+                min_inpt_a = []
+
+                if bob_ends:
+                    t_loss,loss1,classify_loss, bob_out, bob_choice = self.get_loss(inpt, words, lang_hs, lang_h)
+                else:
+                    #bob_out = bob.write(bob_ends)
+                    t_loss, bob_out, bob_choice = self.get_loss(inpt, words, lang_hs, lang_h, bob_ends=bob_ends, bob_out=None)
+                if bob_ends:
+                    print(iter_idx,t_loss, loss1, classify_loss)
+                else:
+                    print(iter_idx,t_loss)
+                if bob_ends:
+                    if loss1==0.0 and t_loss<=-5.0:
+                        print("get legimate adversarial example")
+                        print(self.agents[0]._decode(inpt,bob.model.word_dict))      ### bug still?????
+                        print("bob attack finished")
+                    
+                        break
+                else:
+                    if t_loss<=-3.0:
+                        print("get legimate adversarial example")
+                        print(self.agents[0]._decode(inpt,bob.model.word_dict))      ### bug still?????
+                        print("alice attack finished")
+                        break                    
+                for emb_idx in range(1,inpt.size()[0]-1):                   
+                    min_loss = t_loss
+                    for candi in range(1,all_index_n):
+                        temp_inpt = inpt.clone()
+                        temp_inpt[emb_idx]=candi
+                        if bob_ends:
+                            loss,_,_,_,_= self.get_loss(temp_inpt, words, lang_hs, lang_h)
+                        else:
+                            #bob_out = bob.write(bob_ends)
+                            loss,bob_out,_ = self.get_loss(temp_inpt, words, lang_hs, lang_h, bob_ends=bob_ends, bob_out=None)
+                            if loss<0:
+                                sum_loss=0
+                                for _ in range(10):
+                                    loss,_,_ = self.get_loss(temp_inpt, words, lang_hs, lang_h, bob_ends=bob_ends, bob_out=None)
+                                    sum_loss += loss
+                                    #print(loss)
+                                loss = sum_loss/10
+                        #if loss<0:
+                        #    print("first loss",loss, "bob_choice", bob_choice, "bob_out", bob_out)
+                            #print(temp_inpt,bob.words,bob.lang_hs,bob.lang_h.size())
+                        #    print("sec loss",self.get_loss(temp_inpt, words, lang_hs, lang_h, bob_ends=bob_ends,bob_out=bob_out))
+                            #print(temp_inpt,bob.words,bob.lang_hs,bob.lang_h.size())
+                        #    print("third loss",self.get_loss(temp_inpt, words, lang_hs, lang_h, bob_ends=bob_ends,bob_out=bob_out))
+                            #print(temp_inpt,bob.words,bob.lang_hs,bob.lang_h.size())
+                        if loss<min_loss:
+                            min_loss = loss
+                            min_inpt = temp_inpt.clone()
+                            #print(min_loss)
+                            
+    
+    
+                    min_loss_a.append(min_loss)
+                    min_inpt_a.append(min_inpt)
+
+                if len(min_loss_a)!=0:
+                    min_idx_in_a = np.argmin(min_loss_a)
+                    if min_inpt_a[min_idx_in_a] is not None:
+                        inpt = min_inpt_a[min_idx_in_a].clone()
+                    else:
+                        print(min_inpt_a)
+                    #print(min_inpt_a)
+                    #print(min_loss_a)
+                    #print(inpt)
+                    #print(loss)
+
+
+            
+        #else:
+
+            """
+            if bob_ends:
+                bob.read_emb(inpt_emb, inpt)
+                _, bob_out, _ = bob.write_selection(wb_attack=True)
+                bob.words = words.copy()
+                bob_choice, _, _ = bob.choose(inpt_emb=inpt_emb,wb_attack=True)
+            else:
+                bob.read_emb(inpt_emb, inpt)
+                bob_out = bob.write(bob_ends)
+                out = self.agents[0].write_selection()
+                bob.read(out)
+                bob.words = words.copy()
+                bob_choice, _, _ = bob.choose(inpt_emb=inpt_emb,bob_ends=bob_ends, bob_out=bob_out, wb_attack=True)
+            """
+        return bob_choice, bob_out, t_loss, inpt
 
 
     def run(self, ctxs, logger):
@@ -193,7 +307,7 @@ class Dialog(object):
         else:
             reader, writer = self.agents
 
-        writer, reader = self.agents
+        #reader, writer = self.agents
 
         conv = []
         # reset metrics
@@ -202,213 +316,84 @@ class Dialog(object):
          #### Minhao ####
         count_turns = 0       
 
-        while True:
-            # produce an utterance
-            if count_turns > self.args.max_turns-1:
-                if writer == self.agents[0]:
-                    inpt_emb, inpt, lang_hs, lang_h, words = writer.write_white(reader)
-                    #print(writer.words[-1][0].grad)
-                    ### need padding in the input_emb
+        #bob_ends = False
+        with torch.no_grad():
+            while True:
+                # produce an utterance
+                bob_out= None
+                if count_turns > self.args.max_turns:
+                    print("Failed")
+                    out = writer.write_selection()
+                    logger.dump_sent(writer.name, out)
                     break
-                #else:
+                if writer == self.agents[0]:
+                    inpt, lang_hs, lang_h, words = writer.write_white(reader)
+                    if inpt.size()[0]>3:
+                        print("try to let bob select")
+                        bob_ends = True
+                        bob_choice, bob_out, loss, inpt = self.attack(inpt, lang_hs, lang_h, words, bob_ends)
+                        #continue
+                        if loss<=-5.0 and self._is_selection(bob_out):
+                            break
+                        else:
+                            print("try to let alice select")
+                            bob_ends=False
+                            inpt, lang_hs, lang_h, words = writer.write_white(reader)
+                            bob_choice, bob_out, loss, inpt = self.attack(inpt, lang_hs, lang_h, words, bob_ends)
+                            if loss<=-2.0:
+                                break
+                            else:
+                                print("enlong the dialogue")
+                                out = writer.write()
+                                #if count_turns>3:
+                                #    print("using RL sentence")
+                                #    out = writer.write_rl()
+                                #print(out)
+                    else:
+                        out = writer.write()
+                else:
+                    out = writer.write()
 
-            else:
-                out = writer.write()
+                self.metrics.record('sent_len', len(out))
+                self.metrics.record('full_match', out)
+                self.metrics.record('%s_unique' % writer.name, out)
 
-            self.metrics.record('sent_len', len(out))
-            self.metrics.record('full_match', out)
-            self.metrics.record('%s_unique' % writer.name, out)
-
-            # append the utterance to the conversation
-            conv.append(out)
-            # make the other agent to read it
-            reader.read(out)
-            if not writer.human:
-                logger.dump_sent(writer.name, out)
-            # check if the end of the conversation was generated
-            if self._is_selection(out):
-                self.metrics.record('%s_sel' % writer.name, 1)
-                self.metrics.record('%s_sel' % reader.name, 0)
-                break
-            writer, reader = reader, writer
-            count_turns += 1
+                # append the utterance to the conversation
+                conv.append(out)
+                # make the other agent to read it
+                reader.read(out)
+                if not writer.human:
+                    logger.dump_sent(writer.name, out)
+                # check if the end of the conversation was generated
+                print(out)
+                if self._is_selection(out):
+                    self.metrics.record('%s_sel' % writer.name, 1)
+                    self.metrics.record('%s_sel' % reader.name, 0)
+                    break
+                writer, reader = reader, writer
+                count_turns += 1
             ##### add selection mark if exceeding the max_turns
 
         ### Minhao: need to design loss focusing on the choices
         ### No evalution in the conversation????
-
+        #bob_ends = False
+        #bob_choice, bob_out = self.attack(inpt, lang_hs, lang_h, words, bob_ends)
         bob = self.agents[1]
 
-        choices = []
-        #class_losses = []
-        # generate choices for each of the agents
-        #flag_loss=False
-        
-        ####
-        # get the final loss and do the back-propagation
-        c=1
-        step_size = 5e-2   
-        #lang_hs[0].retain_grad()
-        #print(words)
-        all_index_n = len(self.agents[0].model.word_dict)
-        all_index = torch.LongTensor(range(all_index_n)).cuda()
-        all_word_emb = self.agents[0].model.word_encoder(all_index)
-        threshold = 10
-        #print(all_word_emb.size())
-        print(inpt_emb.size(),inpt)
-        
-        bob_ends = False
-
-        #fixed_lang_h = bob.lang_h.copy()
-        fixed_ctx_h = bob.ctx_h.clone() 
-
-        if inpt_emb.size()[0]>3:
-    
-            iterations = 1000
-            #mask= [0] * (inpt_emb.size()[0]-1)
-            Flag=False
-            for iter_idx in range(iterations):
-                #print(inpt,len(bob.lang_hs),bob.lang_h.size())
-                #print(len(bob.lang_hs))
-                if (iter_idx+1)%1==0 and Flag:                                
-                    inpt_emb = bob.model.get_embedding(inpt,lang_h,fixed_ctx_h)
-                    #changed = False
-                inpt_emb.retain_grad()
-                #bob.lang_hs[-1].retain_grad()
-                bob.read_emb(inpt_emb, inpt)
-                #print(len(bob.lang_hs))
-
-                if bob_ends:
-                    loss1, bob_out, _ = bob.write_selection(wb_attack=True)
-                else:
-                    bob_out = bob.write(bob_ends)
-                    #bob_out = bob._encode(bob_out, bob.model.word_dict)
-        # then append the utterance
-                    #
-                #print(len(bob.lang_hs))
-                #print(len(lang_hs))
-                #print(len(lang_hs))
-                if not bob_ends:
-                    out = self.agents[0].write_selection()
-                    bob.read(out) #????
-
-                #print(len(bob.lang_hs))
-                #if bob_ends:
-                bob.words = words.copy()
-
-                if bob_ends:
-                    bob_choice, classify_loss, _ = bob.choose(inpt_emb=inpt_emb,wb_attack=True)
-                else:
-                    bob_choice, classify_loss, _ = bob.choose(inpt_emb=inpt_emb,bob_ends=bob_ends, bob_out=bob_out, wb_attack=True)
-                #print(len(bob.lang_hs))
-                if bob_ends:
-                    t_loss = c*loss1 + classify_loss
-                else:
-                    t_loss = classify_loss
-
-                if (iter_idx+1)%1==0:
-                    if bob_ends:
-                        print(t_loss.item(), loss1.item(), classify_loss.item())
-                        if loss1==0.0 and classify_loss<=0.0:
-                            print("get legimate adversarial example")
-                            print(self.agents[0]._decode(inpt,bob.model.word_dict))      ### bug still?????
-                            break
-                    else:
-                        print(t_loss.item())
-                        if t_loss.item()<=-3.0:
-                            print("get legimate adversarial example")
-                            print(self.agents[0]._decode(inpt,bob.model.word_dict))      ### bug still?????
-                            break
-                #t_loss = loss1
-                #bob.lang_hs[2].retain_grad()
-                #logits.retain_grad()
-                #t_loss = classify_loss
-                t_loss.backward(retain_graph=True)
-                #print(len(bob.lang_hs))
-                
-                #print(logits.grad)
-                #print(t_loss.item(),loss1.item(),classify_loss.item())
-            #print(inpt_emb.size())
-                #print(inpt_emb.grad.size())
-                inpt_emb.grad[:,:,256:] = 0
-                inpt_emb.grad[0,:,:] = 0
-                #print(inpt_emb.grad[2])
-                #inpt_emb.grad[0][:][:]=0
-                inpt_emb = inpt_emb - step_size * inpt_emb.grad
-                bob.lang_hs = lang_hs.copy()
-                bob.lang_h = lang_h.clone()
-                bob.ctx_h = fixed_ctx_h.clone()
-                # projection
-                min_inpt = None
-                temp_inpt = inpt.clone()
-                if iter_idx%1==0:
-                    for emb_idx in range(1,inpt_emb.size()[0]-1):
-                    #for emb_idx in range(1,4):
-                        rep_candidate = []
-                        dis_a=[] 
-                        for r_idx in range(1,all_index_n): # excluding <eos>
-                            if r_idx==inpt[emb_idx-1].item():
-                                rep_candidate.append(r_idx)
-                                continue
-                            dis=torch.norm(inpt_emb[emb_idx][:,:256]-all_word_emb[r_idx]).item()
-                            if dis< threshold:
-                                rep_candidate.append(r_idx)
-                                if not dis_a:
-                                    continue
-                                elif dis<min(dis_a):
-                                    min_idx = r_idx
-
-                            dis_a.append(dis)
-                        #print(np.argmin(dis_a),min(dis_a))
-                        if rep_candidate:
-                            #mask[emb_idx-1]=1
-                            #temp= random.choice(rep_candidate)
-                            min_loss = t_loss.item()
-                            for candi in rep_candidate:
-                                temp_inpt[emb_idx-1]=candi
-                                if bob_ends:
-                                    loss,_,_ = self.get_loss(temp_inpt, words, lang_hs, lang_h)
-                                else:
-                                    loss = self.get_loss(temp_inpt, words, lang_hs, lang_h, bob_ends=bob_ends)
-                                if loss<min_loss:
-                                    min_loss = loss
-                                    min_inpt = temp_inpt.clone()
-                        else:
-                            continue
-                    if min_inpt is not None:
-                        inpt = min_inpt.clone()
-                        print(inpt)
-                        Flag=True
-                    else:
-                        Flag=False
-                        #break
-                #print(rep_candidate)
-            #print(t_loss,lang_hs[0].grad)
-            print("attack finished")
-        else:
+        if bob_out is not None:
             if bob_ends:
-                bob.read_emb(inpt_emb, inpt)
-                _, bob_out, _ = bob.write_selection(wb_attack=True)
-                bob.words = words.copy()
-                bob_choice, _, _ = bob.choose(inpt_emb=inpt_emb,wb_attack=True)
+                logger.dump_sent(self.agents[0].name,self.agents[0]._decode(inpt,self.agents[0].model.word_dict))
+                logger.dump_sent(bob.name, bob_out)
             else:
-                bob.read_emb(inpt_emb, inpt)
-                bob_out = bob.write(bob_ends)
-                out = self.agents[0].write_selection()
-                bob.read(out)
-                bob.words = words.copy()
-                bob_choice, _, _ = bob.choose(inpt_emb=inpt_emb,bob_ends=bob_ends, bob_out=bob_out, wb_attack=True)
-
-
-        if bob_ends:
-            logger.dump_sent(self.agents[0].name,self.agents[0]._decode(inpt,bob.model.word_dict))
-            logger.dump_sent(bob.name,['<selection>'])
+                logger.dump_sent(self.agents[0].name, self.agents[0]._decode(inpt,self.agents[0].model.word_dict))
+                logger.dump_sent(bob.name, bob._decode(bob_out, bob.model.word_dict))
+                logger.dump_sent(self.agents[0].name, ['<selection>'])
         else:
-            logger.dump_sent(self.agents[0].name, self.agents[0]._decode(inpt,self.agents[0].model.word_dict))
-            logger.dump_sent(bob.name, bob._decode(bob_out, bob.model.word_dict))
-            logger.dump_sent(self.agents[0].name, ['<selection>'])
+            bob_choice, _, _ = bob.choose()
         #####
+        choices = []
         choices.append(bob_choice)
+        #print(choices)
         alice_choice = bob_choice[:]
         for indx in range(3):
            alice_choice[indx+3], alice_choice[indx] = alice_choice[indx], alice_choice[indx+3]

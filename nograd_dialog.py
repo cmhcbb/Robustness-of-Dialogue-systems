@@ -15,6 +15,8 @@ from metric import MetricsContainer
 import data
 import utils
 import domain
+from torch.autograd import Variable
+import torch, random, copy
 
 logging.basicConfig(format='%(asctime)s : %(levelname)s : %(filename)s : %(message)s', level=logging.INFO)
 
@@ -146,6 +148,31 @@ class Dialog(object):
     def show_metrics(self):
         return ' '.join(['%s=%s' % (k, v) for k, v in self.metrics.dict().items()])
 
+    def get_loss(self, inpt, words, lang_hs, lang_h, c=1, bob_ends=True, bob_out=None):
+        bob=self.agents[1]
+        bob.read(inpt, f_encode=False)
+        if bob_ends:
+            loss1, bob_out, _ = bob.write_selection(wb_attack=True)
+            bob_choice, classify_loss, _ = bob.choose()
+            t_loss = c*loss1 + classify_loss
+        else:
+            #if bob_out is None:
+            bob_out = bob.write(bob_ends)
+            _,out,_ = self.agents[0].write_selection(wb_attack=True, alice=True)
+            bob.read(out)
+            bob_choice, classify_loss, _ = bob.choose()
+            t_loss = classify_loss                      
+        #t_loss.backward(retain_graph=True)
+        bob.words = copy.copy(words)
+        bob.lang_hs = copy.copy(lang_hs)
+        bob.lang_h = lang_h.clone()
+        if bob_ends:
+            return t_loss.item(), loss1, classify_loss, bob_out, bob_choice
+        else:
+            return t_loss.item(), bob_out, bob_choice
+            #return t_loss, None, bob_choice
+
+
     def run(self, ctxs, logger):
         """Runs one instance of the dialogue."""
         assert len(self.agents) == len(ctxs)
@@ -166,7 +193,7 @@ class Dialog(object):
         else:
             reader, writer = self.agents
 
-        #writer, reader = self.agents
+        writer, reader = self.agents
 
         conv = []
         # reset metrics
@@ -174,44 +201,148 @@ class Dialog(object):
 
          #### Minhao ####
         count_turns = 0       
+        with torch.no_grad():
+            while True:
+                # produce an utterance
+                if count_turns > self.args.max_turns-1:
+                    if writer == self.agents[0]:
+                        inpt, lang_hs, lang_h, words = writer.write_white(reader)
+                        #print(writer.words[-1][0].grad)
+                        ### need padding in the input_emb
+                        break
+                    #else:
 
-        while True:
-            # produce an utterance
-            if count_turns > self.args.max_turns:
-                out = writer.write_selection()
+                else:
+                    out = writer.write()
+
+                self.metrics.record('sent_len', len(out))
+                self.metrics.record('full_match', out)
+                self.metrics.record('%s_unique' % writer.name, out)
+
+                # append the utterance to the conversation
+                conv.append(out)
+                # make the other agent to read it
+                reader.read(out)
+                if not writer.human:
+                    logger.dump_sent(writer.name, out)
+                # check if the end of the conversation was generated
+                if self._is_selection(out):
+                    self.metrics.record('%s_sel' % writer.name, 1)
+                    self.metrics.record('%s_sel' % reader.name, 0)
+                    break
+                writer, reader = reader, writer
+                count_turns += 1
+                ##### add selection mark if exceeding the max_turns
+
+            ### Minhao: need to design loss focusing on the choices
+            ### No evalution in the conversation????
+
+            bob = self.agents[1]
+
+            choices = []
+            #class_losses = []
+            # generate choices for each of the agents
+            #flag_loss=False
+            
+            c=1
+            #print(words)
+            all_index_n = len(self.agents[0].model.word_dict)
+
+            #print(inpt)
+            
+            bob_ends = True
+
+            #fixed_lang_h = bob.lang_h.copy()
+            fixed_ctx_h = bob.ctx_h.clone() 
+
+            if True:
+                iterations = 100
+                #mask= [0] * (inpt_emb.size()[0]-1)
+                for iter_idx in range(iterations):
+                    # projection
+                    min_inpt = None
+                    #temp_inpt = inpt.clone()
+                    min_loss_a = []
+                    min_inpt_a = []
+
+                    if bob_ends:
+                        t_loss,_,_, bob_out, bob_choice = self.get_loss(inpt, words, lang_hs, lang_h)
+                    else:
+                        #bob_out = bob.write(bob_ends)
+                        t_loss, bob_out, bob_choice = self.get_loss(inpt, words, lang_hs, lang_h, bob_ends=bob_ends, bob_out=None)
+                    print(iter_idx,t_loss)
+                    if t_loss<=-3.0:
+                        print("get legimate adversarial example")
+                        print(self.agents[0]._decode(inpt,bob.model.word_dict))      ### bug still?????
+                        break
+                    for emb_idx in range(1,inpt.size()[0]-1):                   
+                        min_loss = t_loss
+                        for candi in range(1,all_index_n):
+                            temp_inpt = inpt.clone()
+                            temp_inpt[emb_idx]=candi
+                            if bob_ends:
+                                loss,_,_,_,_ = self.get_loss(temp_inpt, words, lang_hs, lang_h)
+                            else:
+                                #bob_out = bob.write(bob_ends)
+                                loss,_,_ = self.get_loss(temp_inpt, words, lang_hs, lang_h, bob_ends=bob_ends, bob_out=None)
+                                if loss<0:
+                                    sum_loss=0
+                                    for _ in range(10):
+                                        loss,_,_ = self.get_loss(temp_inpt, words, lang_hs, lang_h, bob_ends=bob_ends, bob_out=None)
+                                        sum_loss += loss
+                                        #print(loss)
+                                    loss = sum_loss/10
+                            #if loss<0:
+                            #    print("first loss",loss, "bob_choice", bob_choice, "bob_out", bob_out)
+                                #print(temp_inpt,bob.words,bob.lang_hs,bob.lang_h.size())
+                            #    print("sec loss",self.get_loss(temp_inpt, words, lang_hs, lang_h, bob_ends=bob_ends,bob_out=bob_out))
+                                #print(temp_inpt,bob.words,bob.lang_hs,bob.lang_h.size())
+                            #    print("third loss",self.get_loss(temp_inpt, words, lang_hs, lang_h, bob_ends=bob_ends,bob_out=bob_out))
+                                #print(temp_inpt,bob.words,bob.lang_hs,bob.lang_h.size())
+                            if loss<min_loss:
+                                min_loss = loss
+                                min_inpt = temp_inpt.clone()
+                                #print(min_loss)
+                                
+
+
+                        min_loss_a.append(min_loss)
+                        min_inpt_a.append(min_inpt)
+
+                    if len(min_loss_a)!=0:
+                        min_idx_in_a = np.argmin(min_loss_a)
+                        inpt = min_inpt_a[min_idx_in_a].clone()
+                        print(min_loss_a)
+                        print(inpt)
+                        #print(loss)
+                    else:
+                        break
+
+
+                print("attack finished")
             else:
-                out = writer.write()
-
-            self.metrics.record('sent_len', len(out))
-            self.metrics.record('full_match', out)
-            self.metrics.record('%s_unique' % writer.name, out)
-
-            # append the utterance to the conversation
-            conv.append(out)
-            # make the other agent to read it
-            reader.read(out)
-            if not writer.human:
-                logger.dump_sent(writer.name, out)
-            # check if the end of the conversation was generated
-            if self._is_selection(out):
-                self.metrics.record('%s_sel' % writer.name, 1)
-                self.metrics.record('%s_sel' % reader.name, 0)
-                break
-            writer, reader = reader, writer
-            count_turns += 1
-            ##### add selection mark if exceeding the max_turns
-
-        ### Minhao: need to design loss focusing on the choices
-        ### No evalution in the conversation????
+                if bob_ends:
+                    bob.read_emb(inpt_emb, inpt)
+                    _, bob_out, _ = bob.write_selection(wb_attack=True)
+                    bob.words = words.copy()
+                    bob_choice, _, _ = bob.choose(inpt_emb=inpt_emb,wb_attack=True)
+                else:
+                    bob.read_emb(inpt_emb, inpt)
+                    bob_out = bob.write(bob_ends)
+                    out = self.agents[0].write_selection()
+                    bob.read(out)
+                    bob.words = words.copy()
+                    bob_choice, _, _ = bob.choose(inpt_emb=inpt_emb,bob_ends=bob_ends, bob_out=bob_out, wb_attack=True)
 
 
-
-        choices = []
-        #class_losses = []
-        # generate choices for each of the agents
-        #flag_loss=False
-        
-        bob_choice, classify_loss = self.agents[1].choose(flag=True)
+        if bob_ends:
+            logger.dump_sent(self.agents[0].name,self.agents[0]._decode(inpt,bob.model.word_dict))
+            logger.dump_sent(bob.name,['<selection>'])
+        else:
+            logger.dump_sent(self.agents[0].name, self.agents[0]._decode(inpt,self.agents[0].model.word_dict))
+            logger.dump_sent(bob.name, bob._decode(bob_out, bob.model.word_dict))
+            logger.dump_sent(self.agents[0].name, ['<selection>'])
+        #####
         choices.append(bob_choice)
         alice_choice = bob_choice[:]
         for indx in range(3):
@@ -258,7 +389,7 @@ class Dialog(object):
         for agent, reward in zip(self.agents, rewards):
             logger.dump_reward(agent.name, agree, reward)
             logging.debug("%s : %s : %s" % (str(agent.name), str(agree), str(rewards)))
-            agent.update(agree, 5-classify_loss.item())
+            #agent.update(agree, 5-classify_loss.item())
 
 
         if agree:
